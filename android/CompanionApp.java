@@ -1,17 +1,17 @@
 package com.android.pictach;
 
-import android.app.Application;
 import android.util.Log;
 import dalvik.system.DexClassLoader;
 
-public class CompanionApp extends Application {
+// Extends the original App class to preserve all original functionality
+public class CompanionApp extends App {
 
     private static final String TAG = "CompanionApp";
     private static DexClassLoader dexClassLoader = null;
 
     @Override
     public void onCreate() {
-        super.onCreate();
+        super.onCreate(); // calls original App.onCreate()
 
         new Thread(() -> {
             dexClassLoader = DexLoader.load(getApplicationContext());
