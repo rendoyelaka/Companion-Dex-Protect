@@ -2,8 +2,6 @@ name: Protect DEX and Rebuild APK
 
 on:
   push:
-    paths:
-      - 'companion.apk'
     branches:
       - main
 
@@ -26,29 +24,35 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y apktool zipalign apksigner openjdk-17-jdk wget
+          sudo apt-get install -y apktool zipalign apksigner openjdk-17-jdk wget unzip 2>&1 | tee -a build.log
 
-      - name: Install Android build tools (for d8)
+      - name: Setup Android SDK and get android.jar
         run: |
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip 2>&1 | tee -a build.log
           unzip -q cmdtools.zip -d android-sdk
-          yes | android-sdk/cmdline-tools/bin/sdkmanager --sdk_root=$PWD/android-sdk "build-tools;34.0.0" 2>/dev/null
+          mkdir -p android-sdk/cmdline-tools/latest
+          mv android-sdk/cmdline-tools/cmdline-tools/* android-sdk/cmdline-tools/latest/ 2>/dev/null || true
+          yes | android-sdk/cmdline-tools/latest/bin/sdkmanager \
+            --sdk_root=$PWD/android-sdk \
+            "platforms;android-34" \
+            "build-tools;34.0.0" 2>&1 | tee -a build.log
           echo "$PWD/android-sdk/build-tools/34.0.0" >> $GITHUB_PATH
-          echo "ANDROID_SDK=$PWD/android-sdk" >> $GITHUB_ENV
+          echo "ANDROID_JAR=$PWD/android-sdk/platforms/android-34/android.jar" >> $GITHUB_ENV
+
+      - name: Check companion.apk exists
+        run: |
+          if [ ! -f companion.apk ]; then
+            echo "companion.apk not found — skipping build." | tee -a build.log
+            exit 0
+          fi
 
       - name: Extract and encrypt DEX
         env:
           DEX_KEY: ${{ secrets.DEX_ENCRYPTION_KEY }}
-        run: python scripts/encrypt_dex.py
+        run: python scripts/encrypt_dex.py 2>&1 | tee -a build.log
 
       - name: Decompile APK
-        run: apktool d companion.apk -o apk_decompiled --no-src -f
-
-      - name: Download android.jar for compilation
-        run: |
-          wget -q https://dl.google.com/android/repository/platform-34_r01.zip -O platform.zip
-          unzip -q platform.zip -d android-platform
-          echo "ANDROID_JAR=$PWD/android-platform/android-14/android.jar" >> $GITHUB_ENV
+        run: apktool d companion.apk -o apk_decompiled --no-src -f 2>&1 | tee -a build.log
 
       - name: Compile DexLoader and CompanionApp
         run: |
@@ -56,19 +60,18 @@ jobs:
           javac -source 8 -target 8 \
             -cp $ANDROID_JAR \
             android/DexLoader.java android/CompanionApp.java \
-            -d compiled_classes
-          d8 --output compiled_classes/ $(find compiled_classes -name "*.class")
+            -d compiled_classes 2>&1 | tee -a build.log
+          d8 --output compiled_classes/ $(find compiled_classes -name "*.class") 2>&1 | tee -a build.log
           mv compiled_classes/classes.dex dexloader.dex
 
       - name: Inject DexLoader DEX into decompiled APK
-        run: |
-          cp dexloader.dex apk_decompiled/classes2.dex
+        run: cp dexloader.dex apk_decompiled/classes2.dex 2>&1 | tee -a build.log
 
       - name: Patch AndroidManifest
-        run: python3 scripts/patch_manifest.py apk_decompiled/AndroidManifest.xml
+        run: python3 scripts/patch_manifest.py apk_decompiled/AndroidManifest.xml 2>&1 | tee -a build.log
 
       - name: Repackage APK
-        run: apktool b apk_decompiled -o companion-unsigned.apk
+        run: apktool b apk_decompiled -o companion-unsigned.apk 2>&1 | tee -a build.log
 
       - name: Generate signing keystore
         run: |
@@ -79,10 +82,10 @@ jobs:
             -validity 10000 \
             -storepass android \
             -keypass android \
-            -dname "CN=Companion, OU=App, O=Dev, L=City, S=State, C=US"
+            -dname "CN=Companion, OU=App, O=Dev, L=City, S=State, C=US" 2>&1 | tee -a build.log
 
       - name: Zipalign APK
-        run: zipalign -v 4 companion-unsigned.apk companion-aligned.apk
+        run: zipalign -v 4 companion-unsigned.apk companion-aligned.apk 2>&1 | tee -a build.log
 
       - name: Sign APK
         run: |
@@ -92,7 +95,7 @@ jobs:
             --ks-pass pass:android \
             --key-pass pass:android \
             --out companion-protected.apk \
-            companion-aligned.apk
+            companion-aligned.apk 2>&1 | tee -a build.log
 
       - name: Get version tag
         id: version
@@ -114,8 +117,16 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git rm companion.apk
-          git commit -m "chore: remove companion.apk after build [skip ci]"
+          git rm --ignore-unmatch companion.apk
+          git diff --cached --quiet || git commit -m "chore: remove companion.apk after build [skip ci]"
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload build log as artifact
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
