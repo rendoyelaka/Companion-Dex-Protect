@@ -108,13 +108,11 @@ jobs:
           OLD_CLASS = b'com.android.pictach.App'
           NEW_CLASS = b'com.android.pictach.CompanionApp'
 
-          # Read manifest and patch
           with zipfile.ZipFile(src, 'r') as z:
               manifest = z.read("AndroidManifest.xml")
 
           if NEW_CLASS not in manifest and OLD_CLASS in manifest:
-              old_len = len(OLD_CLASS)
-              new_len = len(NEW_CLASS)
+              old_len, new_len = len(OLD_CLASS), len(NEW_CLASS)
               p1 = bytes([old_len, old_len]) + OLD_CLASS
               r1 = bytes([new_len, new_len]) + NEW_CLASS
               if p1 in manifest:
@@ -123,21 +121,16 @@ jobs:
               else:
                   p2 = bytes([old_len]) + OLD_CLASS
                   r2 = bytes([new_len]) + NEW_CLASS
-                  if p2 in manifest:
-                      manifest = manifest.replace(p2, r2, 1)
-                      print("[*] Manifest patched (single-len).")
-                  else:
-                      manifest = manifest.replace(OLD_CLASS, NEW_CLASS, 1)
-                      print("[*] Manifest patched (raw).")
-          elif NEW_CLASS in manifest:
-              print("[*] Manifest already patched.")
+                  manifest = manifest.replace(p2, r2, 1) if p2 in manifest else manifest.replace(OLD_CLASS, NEW_CLASS, 1)
+                  print("[*] Manifest patched.")
           else:
-              print("[!] App class not found in manifest.")
+              print("[*] Manifest already patched or class not found.")
 
-          # Create stub classes.dex
-          MAGIC = b'dex\n035\x00'
+          with open("AndroidManifest.xml", "wb") as f:
+              f.write(manifest)
+
           stub = bytearray(0x70)
-          stub[0:8] = MAGIC
+          stub[0:8] = b'dex\n035\x00'
           struct.pack_into('<I', stub, 32, 0x70)
           struct.pack_into('<I', stub, 36, 0x70)
           struct.pack_into('<I', stub, 40, 0x12345678)
@@ -145,47 +138,15 @@ jobs:
           stub[12:32] = sha1
           adler = zlib.adler32(bytes(stub[12:])) & 0xFFFFFFFF
           struct.pack_into('<I', stub, 8, adler)
-          stub_dex = bytes(stub)
-          print("[*] Stub classes.dex created.")
-
-          # Load DexLoader DEX
-          with open("dexloader.dex", "rb") as f:
-              dexloader = f.read()
-
-          # Rebuild APK preserving exact compression type per entry
-          has_classes2 = False
-          with zipfile.ZipFile(src, "r") as orig:
-              names = orig.namelist()
-              has_classes2 = "classes2.dex" in names
-
-          with zipfile.ZipFile("companion-modified.apk", "w") as zout:
-              with zipfile.ZipFile(src, "r") as orig:
-                  for item in orig.infolist():
-                      if item.filename == "AndroidManifest.xml":
-                          info = zipfile.ZipInfo("AndroidManifest.xml")
-                          info.compress_type = item.compress_type
-                          zout.writestr(info, manifest)
-                      elif item.filename == "classes.dex":
-                          info = zipfile.ZipInfo("classes.dex")
-                          info.compress_type = item.compress_type
-                          zout.writestr(info, stub_dex)
-                      elif item.filename == "classes2.dex":
-                          info = zipfile.ZipInfo("classes2.dex")
-                          info.compress_type = zipfile.ZIP_DEFLATED
-                          zout.writestr(info, dexloader)
-                      else:
-                          data = orig.read(item.filename)
-                          info = zipfile.ZipInfo(item.filename)
-                          info.compress_type = item.compress_type
-                          zout.writestr(info, data)
-                  # Add classes2.dex if not in original
-                  if not has_classes2:
-                      info = zipfile.ZipInfo("classes2.dex")
-                      info.compress_type = zipfile.ZIP_DEFLATED
-                      zout.writestr(info, dexloader)
-
-          print("[*] APK rebuilt successfully.")
+          with open("classes.dex", "wb") as f:
+              f.write(bytes(stub))
+          print("[*] Stub classes.dex written.")
           PYEOF
+
+          cp dexloader.dex classes2.dex
+          cp companion.apk companion-modified.apk
+          zip companion-modified.apk AndroidManifest.xml classes.dex classes2.dex
+          zip -d companion-modified.apk "META-INF/*" || true
           echo "[*] Injection done." | tee -a build.log
 
       - name: Generate signing keystore
