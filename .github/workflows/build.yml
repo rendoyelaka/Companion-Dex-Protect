@@ -18,24 +18,61 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Cache Python deps
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-pycryptodome-requests
+
       - name: Install Python deps
         run: pip install pycryptodome requests 2>&1 | tee build.log
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-zipalign-apksigner-jdk-${{ runner.os }}
 
       - name: Install tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y zipalign apksigner openjdk-17-jdk wget unzip 2>&1 | tee -a build.log
 
+      - name: Cache apktool
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/apktool.jar
+          key: apktool-2.9.3
+
+      - name: Install latest apktool
+        run: |
+          if [ ! -f /usr/local/bin/apktool.jar ]; then
+            wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
+          fi
+          printf '#!/bin/bash\njava -jar /usr/local/bin/apktool.jar "$@"\n' | sudo tee /usr/local/bin/apktool > /dev/null
+          sudo chmod +x /usr/local/bin/apktool
+          apktool --version 2>&1 | tee -a build.log
+
+      - name: Cache Android SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/android-sdk
+          key: android-sdk-platform34-buildtools34
+
       - name: Setup Android SDK
         run: |
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
-          unzip -q cmdtools.zip -d cmdline-tools-tmp
-          mkdir -p $HOME/android-sdk/cmdline-tools/latest
-          mv cmdline-tools-tmp/cmdline-tools/* $HOME/android-sdk/cmdline-tools/latest/
-          yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager \
-            --sdk_root=$HOME/android-sdk \
-            "platforms;android-34" \
-            "build-tools;34.0.0" 2>&1 | tee -a build.log
+          if [ ! -f "$HOME/android-sdk/platforms/android-34/android.jar" ]; then
+            wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
+            unzip -q cmdtools.zip -d cmdline-tools-tmp
+            mkdir -p $HOME/android-sdk/cmdline-tools/latest
+            mv cmdline-tools-tmp/cmdline-tools/* $HOME/android-sdk/cmdline-tools/latest/
+            yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager \
+              --sdk_root=$HOME/android-sdk \
+              "platforms;android-34" \
+              "build-tools;34.0.0" 2>&1 | tee -a build.log
+          else
+            echo "[*] Android SDK cached." | tee -a build.log
+          fi
           echo "ANDROID_JAR=$HOME/android-sdk/platforms/android-34/android.jar" >> $GITHUB_ENV
           echo "D8=$HOME/android-sdk/build-tools/34.0.0/d8" >> $GITHUB_ENV
 
@@ -52,43 +89,77 @@ jobs:
           DEX_KEY: ${{ secrets.DEX_ENCRYPTION_KEY }}
         run: python scripts/encrypt_dex.py 2>&1 | tee -a build.log
 
+      - name: Extract classes.dex from APK for compilation classpath
+        run: |
+          unzip -o companion.apk classes.dex -d apk_classes/
+          echo "[*] Extracted classes.dex for classpath." | tee -a build.log
+
       - name: Compile DexLoader and CompanionApp
         run: |
           mkdir -p compiled_classes
+          # Use both android.jar AND original classes.dex as classpath
+          # so CompanionApp can find App class
           javac -source 8 -target 8 \
-            -cp $ANDROID_JAR \
+            -cp $ANDROID_JAR:apk_classes/classes.dex \
             android/DexLoader.java android/CompanionApp.java \
             -d compiled_classes 2>&1 | tee -a build.log
           $D8 --output compiled_classes/ $(find compiled_classes -name "*.class") 2>&1 | tee -a build.log
           mv compiled_classes/classes.dex dexloader.dex
           echo "[*] DexLoader compiled." | tee -a build.log
 
-      - name: Inject DEX directly into APK zip
+      - name: Inject DEX and patch manifest into APK
         run: |
-          cp companion.apk companion-modified.apk
-          # Add classes2.dex (DexLoader) directly into APK
-          zip companion-modified.apk dexloader.dex
-          cd companion-modified-extract && true || true
-          # Rename inside zip to classes2.dex
           python3 - << 'PYEOF'
-          import zipfile, shutil, os
+          import zipfile, shutil, os, sys
 
           src = "companion.apk"
           dst = "companion-modified.apk"
           dex = "dexloader.dex"
 
-          shutil.copy(src, dst)
+          OLD_CLASS = b'com.android.pictach.App'
+          NEW_CLASS = b'com.android.pictach.CompanionApp'
 
-          with zipfile.ZipFile(dst, 'a') as z:
-              z.write(dex, "classes2.dex")
+          orig_entries = {}
+          with zipfile.ZipFile(src, 'r') as z:
+              for name in z.namelist():
+                  orig_entries[name] = z.read(name)
 
-          print("[*] classes2.dex injected into APK.")
+          # Patch binary AndroidManifest.xml
+          manifest = orig_entries.get("AndroidManifest.xml", b"")
+          if NEW_CLASS not in manifest and OLD_CLASS in manifest:
+              old_len = len(OLD_CLASS)
+              new_len = len(NEW_CLASS)
+              pattern = bytes([old_len, old_len]) + OLD_CLASS
+              replacement = bytes([new_len, new_len]) + NEW_CLASS
+              if pattern in manifest:
+                  manifest = manifest.replace(pattern, replacement, 1)
+                  print(f"[*] Manifest patched (double-len).")
+              else:
+                  pattern = bytes([old_len]) + OLD_CLASS
+                  replacement = bytes([new_len]) + NEW_CLASS
+                  if pattern in manifest:
+                      manifest = manifest.replace(pattern, replacement, 1)
+                      print(f"[*] Manifest patched (single-len).")
+                  else:
+                      manifest = manifest.replace(OLD_CLASS, NEW_CLASS, 1)
+                      print(f"[*] Manifest patched (raw).")
+              orig_entries["AndroidManifest.xml"] = manifest
+          elif NEW_CLASS in manifest:
+              print("[*] Manifest already patched.")
+          else:
+              print("[!] App class not found in manifest.")
+
+          # Add classes2.dex
+          with open(dex, "rb") as f:
+              orig_entries["classes2.dex"] = f.read()
+          print("[*] classes2.dex injected.")
+
+          # Write new APK
+          with zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as z:
+              for name, data in orig_entries.items():
+                  z.writestr(name, data)
+          print("[*] APK rebuilt successfully.")
           PYEOF
-          echo "[*] DEX injection done." | tee -a build.log
-
-      - name: Patch AndroidManifest in APK
-        run: |
-          python3 scripts/patch_apk_manifest.py companion-modified.apk 2>&1 | tee -a build.log
 
       - name: Zipalign APK
         run: zipalign -v 4 companion-modified.apk companion-aligned.apk 2>&1 | tee -a build.log
