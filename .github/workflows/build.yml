@@ -24,7 +24,18 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y apktool zipalign apksigner openjdk-17-jdk wget unzip 2>&1 | tee -a build.log
+          sudo apt-get install -y zipalign apksigner openjdk-17-jdk wget unzip 2>&1 | tee -a build.log
+
+      - name: Install latest apktool
+        run: |
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
+          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O apktool
+          chmod +x apktool
+          sudo mv apktool apktool.jar /usr/local/bin/
+          echo '#!/bin/bash' | sudo tee /usr/local/bin/apktool > /dev/null
+          echo 'java -jar /usr/local/bin/apktool.jar "$@"' | sudo tee -a /usr/local/bin/apktool > /dev/null
+          sudo chmod +x /usr/local/bin/apktool
+          apktool --version 2>&1 | tee -a build.log
 
       - name: Setup Android SDK
         run: |
@@ -32,21 +43,20 @@ jobs:
           unzip -q cmdtools.zip -d cmdline-tools-tmp
           mkdir -p $HOME/android-sdk/cmdline-tools/latest
           mv cmdline-tools-tmp/cmdline-tools/* $HOME/android-sdk/cmdline-tools/latest/
-          export ANDROID_SDK_ROOT=$HOME/android-sdk
           yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager \
             --sdk_root=$HOME/android-sdk \
             "platforms;android-34" \
             "build-tools;34.0.0" 2>&1 | tee -a build.log
-          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
           echo "ANDROID_JAR=$HOME/android-sdk/platforms/android-34/android.jar" >> $GITHUB_ENV
           echo "D8=$HOME/android-sdk/build-tools/34.0.0/d8" >> $GITHUB_ENV
 
       - name: Check companion.apk exists
         run: |
           if [ ! -f companion.apk ]; then
-            echo "companion.apk not found — skipping build." | tee -a build.log
-            exit 0
+            echo "ERROR: companion.apk not found." | tee -a build.log
+            exit 1
           fi
+          echo "companion.apk found." | tee -a build.log
 
       - name: Extract and encrypt DEX
         env:
@@ -73,7 +83,7 @@ jobs:
         run: python3 scripts/patch_manifest.py apk_decompiled/AndroidManifest.xml 2>&1 | tee -a build.log
 
       - name: Repackage APK
-        run: apktool b apk_decompiled -o companion-unsigned.apk 2>&1 | tee -a build.log
+        run: apktool b apk_decompiled -o companion-unsigned.apk --use-aapt2 2>&1 | tee -a build.log
 
       - name: Generate signing keystore
         run: |
