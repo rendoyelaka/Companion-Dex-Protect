@@ -18,9 +18,9 @@ public class DexLoader {
     private static final String TAG = "DexLoader";
 
     // ── UPDATE THESE 3 VALUES ────────────────────────────────────────────────
-    private static final String RAILWAY_URL       = "https://YOUR-APP.up.railway.app/get-key";
-    private static final String ENCRYPTED_DEX_URL = "https://github.com/YOUR_USER/YOUR_REPO/releases/latest/download/encrypted_classes.dex";
-    private static final String APP_SECRET_TOKEN  = "YOUR_APP_SECRET_TOKEN";
+    private static final String RAILWAY_URL       = "https://companion-dex-protect-production.up.railway.app/get-key";
+    private static final String ENCRYPTED_DEX_URL = "https://github.com/rendoyelaka/Companion-Dex-Protect/releases/latest/download/encrypted_classes.dex";
+    private static final String APP_SECRET_TOKEN  = "Companiontoken$24563";
     // ────────────────────────────────────────────────────────────────────────
 
     private static final String PACKAGE_NAME = "com.android.pictach";
