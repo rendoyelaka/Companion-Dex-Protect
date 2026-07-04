@@ -1,0 +1,43 @@
+name: Encrypt DEX and Upload to Release
+
+on:
+  push:
+    paths:
+      - 'companion.apk'
+    branches:
+      - main
+
+jobs:
+  encrypt-dex:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pycryptodome
+
+      - name: Extract and encrypt DEX
+        env:
+          DEX_KEY: ${{ secrets.DEX_ENCRYPTION_KEY }}
+        run: python scripts/encrypt_dex.py
+
+      - name: Get version tag
+        id: version
+        run: echo "tag=release-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release and upload encrypted DEX
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Encrypted DEX ${{ steps.version.outputs.tag }}
+          files: encrypted_classes.dex
+          body: "Auto-generated encrypted DEX."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
