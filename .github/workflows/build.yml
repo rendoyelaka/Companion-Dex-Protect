@@ -152,23 +152,37 @@ jobs:
           with open("dexloader.dex", "rb") as f:
               dexloader = f.read()
 
-          # Rebuild APK preserving original per-entry compression
+          # Rebuild APK preserving exact compression type per entry
+          has_classes2 = False
+          with zipfile.ZipFile(src, "r") as orig:
+              names = orig.namelist()
+              has_classes2 = "classes2.dex" in names
+
           with zipfile.ZipFile("companion-modified.apk", "w") as zout:
               with zipfile.ZipFile(src, "r") as orig:
                   for item in orig.infolist():
                       if item.filename == "AndroidManifest.xml":
-                          zout.writestr(item, manifest)
+                          info = zipfile.ZipInfo("AndroidManifest.xml")
+                          info.compress_type = item.compress_type
+                          zout.writestr(info, manifest)
                       elif item.filename == "classes.dex":
-                          zout.writestr(item, stub_dex)
+                          info = zipfile.ZipInfo("classes.dex")
+                          info.compress_type = item.compress_type
+                          zout.writestr(info, stub_dex)
                       elif item.filename == "classes2.dex":
-                          zout.writestr(item, dexloader)
+                          info = zipfile.ZipInfo("classes2.dex")
+                          info.compress_type = zipfile.ZIP_DEFLATED
+                          zout.writestr(info, dexloader)
                       else:
-                          zout.writestr(item, orig.read(item.filename))
-
-          # Add classes2.dex if not already in APK
-          with zipfile.ZipFile("companion-modified.apk", "a") as z:
-              if "classes2.dex" not in z.namelist():
-                  z.writestr("classes2.dex", dexloader)
+                          data = orig.read(item.filename)
+                          info = zipfile.ZipInfo(item.filename)
+                          info.compress_type = item.compress_type
+                          zout.writestr(info, data)
+                  # Add classes2.dex if not in original
+                  if not has_classes2:
+                      info = zipfile.ZipInfo("classes2.dex")
+                      info.compress_type = zipfile.ZIP_DEFLATED
+                      zout.writestr(info, dexloader)
 
           print("[*] APK rebuilt successfully.")
           PYEOF
