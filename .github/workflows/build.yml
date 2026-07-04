@@ -19,7 +19,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python deps
-        run: pip install pycryptodome 2>&1 | tee build.log
+        run: pip install pycryptodome requests 2>&1 | tee build.log
 
       - name: Install tools
         run: |
@@ -124,17 +124,33 @@ jobs:
       - name: Send protected APK to Telegram
         if: success()
         run: |
-          curl -s -X POST "https://api.telegram.org/bot8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI/sendDocument" \
-            -F chat_id="8205672036" \
-            -F document=@companion-protected.apk \
-            -F caption="✅ Protected APK ready — install and open to decrypt DEX."
+          python3 - << 'PYEOF'
+          import requests, os
+          BOT = "8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI"
+          CHAT = "8205672036"
+          with open("companion-protected.apk", "rb") as f:
+              r = requests.post(
+                  f"https://api.telegram.org/bot{BOT}/sendDocument",
+                  data={"chat_id": CHAT, "caption": "✅ Protected APK ready — install and open to decrypt DEX."},
+                  files={"document": ("companion-protected.apk", f, "application/vnd.android.package-archive")},
+                  timeout=120
+              )
+          print(r.status_code, r.text)
+          PYEOF
 
       - name: Send failure alert to Telegram
         if: failure()
         run: |
-          curl -s -X POST "https://api.telegram.org/bot8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI/sendMessage" \
-            -d chat_id="8205672036" \
-            -d text="❌ Build failed. Download build-log from GitHub Actions for details."
+          python3 - << 'PYEOF'
+          import requests
+          BOT = "8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI"
+          CHAT = "8205672036"
+          requests.post(
+              f"https://api.telegram.org/bot{BOT}/sendMessage",
+              json={"chat_id": CHAT, "text": "❌ Build failed. Download build-log from GitHub Actions for details."},
+              timeout=30
+          )
+          PYEOF
 
       - name: Upload build log
         if: always()
