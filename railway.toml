@@ -1,0 +1,8 @@
+[build]
+builder = "nixpacks"
+buildCommand = "cd railway-server && npm install"
+
+[deploy]
+startCommand = "cd railway-server && node index.js"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
