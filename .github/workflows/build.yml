@@ -23,10 +23,18 @@ jobs:
       - name: Install Python deps
         run: pip install pycryptodome
 
-      - name: Install tools (apktool, zipalign, apksigner, JDK)
+      - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y apktool zipalign apksigner openjdk-17-jdk
+          sudo apt-get install -y apktool zipalign apksigner openjdk-17-jdk wget
+
+      - name: Install Android build tools (for d8)
+        run: |
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
+          unzip -q cmdtools.zip -d android-sdk
+          yes | android-sdk/cmdline-tools/bin/sdkmanager --sdk_root=$PWD/android-sdk "build-tools;34.0.0" 2>/dev/null
+          echo "$PWD/android-sdk/build-tools/34.0.0" >> $GITHUB_PATH
+          echo "ANDROID_SDK=$PWD/android-sdk" >> $GITHUB_ENV
 
       - name: Extract and encrypt DEX
         env:
@@ -36,29 +44,28 @@ jobs:
       - name: Decompile APK
         run: apktool d companion.apk -o apk_decompiled --no-src -f
 
-      - name: Compile DexLoader into DEX
+      - name: Download android.jar for compilation
         run: |
-          mkdir -p dexloader_classes
+          wget -q https://dl.google.com/android/repository/platform-34_r01.zip -O platform.zip
+          unzip -q platform.zip -d android-platform
+          echo "ANDROID_JAR=$PWD/android-platform/android-14/android.jar" >> $GITHUB_ENV
+
+      - name: Compile DexLoader and CompanionApp
+        run: |
+          mkdir -p compiled_classes
           javac -source 8 -target 8 \
-            -cp $(find /usr/lib/jvm -name "android.jar" 2>/dev/null | head -1):. \
+            -cp $ANDROID_JAR \
             android/DexLoader.java android/CompanionApp.java \
-            -d dexloader_classes 2>/dev/null || true
+            -d compiled_classes
+          d8 --output compiled_classes/ $(find compiled_classes -name "*.class")
+          mv compiled_classes/classes.dex dexloader.dex
 
-          # Use d8 if available, else dx
-          if command -v d8 &> /dev/null; then
-            d8 --output dexloader_classes/ dexloader_classes/**/*.class
-          else
-            dx --dex --output=dexloader_classes/dexloader.dex dexloader_classes/
-          fi
-
-      - name: Merge DexLoader DEX into APK DEX
+      - name: Inject DexLoader DEX into decompiled APK
         run: |
-          # Copy merged dex into decompiled APK
-          cp dexloader_classes/dexloader.dex apk_decompiled/classes2.dex || true
+          cp dexloader.dex apk_decompiled/classes2.dex
 
-      - name: Inject Application class into AndroidManifest
-        run: |
-          python3 scripts/patch_manifest.py apk_decompiled/AndroidManifest.xml
+      - name: Patch AndroidManifest
+        run: python3 scripts/patch_manifest.py apk_decompiled/AndroidManifest.xml
 
       - name: Repackage APK
         run: apktool b apk_decompiled -o companion-unsigned.apk
