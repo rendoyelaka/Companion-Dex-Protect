@@ -6,3 +6,6 @@ buildCommand = "cd railway-server && npm install"
 startCommand = "cd railway-server && node index.js"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 10
+
+[nixpacks]
+pkgs = ["nodejs_18"]
