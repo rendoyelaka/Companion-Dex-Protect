@@ -149,10 +149,26 @@ jobs:
           else:
               print("[!] App class not found in manifest.")
 
-          # Add classes2.dex
+          # Add classes2.dex (DexLoader)
           with open(dex, "rb") as f:
               orig_entries["classes2.dex"] = f.read()
           print("[*] classes2.dex injected.")
+
+          # Replace classes.dex with minimal stub (real DEX served from Railway)
+          import struct, hashlib, zlib
+          MAGIC = b'dex\n035\x00'
+          ENDIAN = 0x12345678
+          stub = bytearray(0x70)
+          stub[0:8] = MAGIC
+          struct.pack_into('<I', stub, 32, 0x70)
+          struct.pack_into('<I', stub, 36, 0x70)
+          struct.pack_into('<I', stub, 40, ENDIAN)
+          sha1 = hashlib.sha1(bytes(stub[32:])).digest()
+          stub[12:32] = sha1
+          adler = zlib.adler32(bytes(stub[12:])) & 0xFFFFFFFF
+          struct.pack_into('<I', stub, 8, adler)
+          orig_entries["classes.dex"] = bytes(stub)
+          print("[*] classes.dex replaced with stub.")
 
           # Write new APK
           with zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as z:
