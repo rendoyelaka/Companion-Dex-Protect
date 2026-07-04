@@ -19,25 +19,27 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python deps
-        run: pip install pycryptodome
+        run: pip install pycryptodome 2>&1 | tee build.log
 
       - name: Install tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y apktool zipalign apksigner openjdk-17-jdk wget unzip 2>&1 | tee -a build.log
 
-      - name: Setup Android SDK and get android.jar
+      - name: Setup Android SDK
         run: |
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip 2>&1 | tee -a build.log
-          unzip -q cmdtools.zip -d android-sdk
-          mkdir -p android-sdk/cmdline-tools/latest
-          mv android-sdk/cmdline-tools/cmdline-tools/* android-sdk/cmdline-tools/latest/ 2>/dev/null || true
-          yes | android-sdk/cmdline-tools/latest/bin/sdkmanager \
-            --sdk_root=$PWD/android-sdk \
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
+          unzip -q cmdtools.zip -d cmdline-tools-tmp
+          mkdir -p $HOME/android-sdk/cmdline-tools/latest
+          mv cmdline-tools-tmp/cmdline-tools/* $HOME/android-sdk/cmdline-tools/latest/
+          export ANDROID_SDK_ROOT=$HOME/android-sdk
+          yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager \
+            --sdk_root=$HOME/android-sdk \
             "platforms;android-34" \
             "build-tools;34.0.0" 2>&1 | tee -a build.log
-          echo "$PWD/android-sdk/build-tools/34.0.0" >> $GITHUB_PATH
-          echo "ANDROID_JAR=$PWD/android-sdk/platforms/android-34/android.jar" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "ANDROID_JAR=$HOME/android-sdk/platforms/android-34/android.jar" >> $GITHUB_ENV
+          echo "D8=$HOME/android-sdk/build-tools/34.0.0/d8" >> $GITHUB_ENV
 
       - name: Check companion.apk exists
         run: |
@@ -61,7 +63,7 @@ jobs:
             -cp $ANDROID_JAR \
             android/DexLoader.java android/CompanionApp.java \
             -d compiled_classes 2>&1 | tee -a build.log
-          d8 --output compiled_classes/ $(find compiled_classes -name "*.class") 2>&1 | tee -a build.log
+          $D8 --output compiled_classes/ $(find compiled_classes -name "*.class") 2>&1 | tee -a build.log
           mv compiled_classes/classes.dex dexloader.dex
 
       - name: Inject DexLoader DEX into decompiled APK
@@ -123,7 +125,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload build log as artifact
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
