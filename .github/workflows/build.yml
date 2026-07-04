@@ -100,7 +100,7 @@ jobs:
           # Use both android.jar AND original classes.dex as classpath
           # so CompanionApp can find App class
           javac -source 8 -target 8 \
-            -cp $ANDROID_JAR:apk_classes/classes.dex \
+            -cp $ANDROID_JAR \
             android/DexLoader.java android/CompanionApp.java \
             -d compiled_classes 2>&1 | tee -a build.log
           $D8 --output compiled_classes/ $(find compiled_classes -name "*.class") 2>&1 | tee -a build.log
