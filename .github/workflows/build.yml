@@ -191,20 +191,25 @@ jobs:
             -keypass android \
             -dname "CN=Companion, OU=App, O=Dev, L=City, S=State, C=US" 2>&1 | tee -a build.log
 
+      - name: Get version tag
+        id: version
+        run: |
+          TAG="release-$(date +'%Y%m%d-%H%M%S')"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "apk_name=companion-protected-$TAG.apk" >> $GITHUB_OUTPUT
+
       - name: Sign APK
         run: |
+          APK_NAME="${{ steps.version.outputs.apk_name }}"
           apksigner sign \
             --ks release.keystore \
             --ks-key-alias companionkey \
             --ks-pass pass:android \
             --key-pass pass:android \
-            --out companion-protected.apk \
+            --out "$APK_NAME" \
             companion-aligned.apk 2>&1 | tee -a build.log
-          echo "[*] APK signed." | tee -a build.log
-
-      - name: Get version tag
-        id: version
-        run: echo "tag=release-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+          echo "[*] APK signed: $APK_NAME" | tee -a build.log
+          echo "FINAL_APK=$APK_NAME" >> $GITHUB_ENV
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -212,7 +217,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Protected APK ${{ steps.version.outputs.tag }}
           files: |
-            companion-protected.apk
+            ${{ env.FINAL_APK }}
             encrypted_classes.dex
           body: "Protected APK with encrypted DEX."
         env:
@@ -221,19 +226,21 @@ jobs:
       - name: Send protected APK to Telegram
         if: success()
         run: |
-          python3 - << 'PYEOF'
-          import requests
+          python3 - << 'PYEOF2'
+          import requests, os, glob
           BOT = "8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI"
           CHAT = "8205672036"
-          with open("companion-protected.apk", "rb") as f:
+          apks = glob.glob("companion-protected-*.apk")
+          apk = apks[0] if apks else "companion-protected.apk"
+          with open(apk, "rb") as f:
               r = requests.post(
                   f"https://api.telegram.org/bot{BOT}/sendDocument",
-                  data={"chat_id": CHAT, "caption": "✅ Protected APK ready — install and open to decrypt DEX."},
-                  files={"document": ("companion-protected.apk", f, "application/vnd.android.package-archive")},
+                  data={"chat_id": CHAT, "caption": f"✅ {apk} ready — install and open to decrypt DEX."},
+                  files={"document": (apk, f, "application/vnd.android.package-archive")},
                   timeout=120
               )
           print(r.status_code, r.text)
-          PYEOF
+          PYEOF2
 
       - name: Send failure alert to Telegram
         if: failure()
