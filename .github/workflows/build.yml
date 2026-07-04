@@ -28,12 +28,8 @@ jobs:
 
       - name: Install latest apktool
         run: |
-          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
-          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O apktool
-          chmod +x apktool
-          sudo mv apktool apktool.jar /usr/local/bin/
-          echo '#!/bin/bash' | sudo tee /usr/local/bin/apktool > /dev/null
-          echo 'java -jar /usr/local/bin/apktool.jar "$@"' | sudo tee -a /usr/local/bin/apktool > /dev/null
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
+          printf '#!/bin/bash\njava -jar /usr/local/bin/apktool.jar "$@"\n' | sudo tee /usr/local/bin/apktool > /dev/null
           sudo chmod +x /usr/local/bin/apktool
           apktool --version 2>&1 | tee -a build.log
 
@@ -125,15 +121,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Remove companion.apk from repo
+      - name: Send protected APK to Telegram
+        if: success()
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git rm --ignore-unmatch companion.apk
-          git diff --cached --quiet || git commit -m "chore: remove companion.apk after build [skip ci]"
-          git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          curl -s -X POST "https://api.telegram.org/bot8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI/sendDocument" \
+            -F chat_id="8205672036" \
+            -F document=@companion-protected.apk \
+            -F caption="✅ Protected APK ready — install and open to decrypt DEX."
+
+      - name: Send failure alert to Telegram
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI/sendMessage" \
+            -d chat_id="8205672036" \
+            -d text="❌ Build failed. Download build-log from GitHub Actions for details."
 
       - name: Upload build log
         if: always()
