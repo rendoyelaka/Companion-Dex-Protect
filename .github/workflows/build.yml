@@ -26,13 +26,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y zipalign apksigner openjdk-17-jdk wget unzip 2>&1 | tee -a build.log
 
-      - name: Install latest apktool
-        run: |
-          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
-          printf '#!/bin/bash\njava -jar /usr/local/bin/apktool.jar "$@"\n' | sudo tee /usr/local/bin/apktool > /dev/null
-          sudo chmod +x /usr/local/bin/apktool
-          apktool --version 2>&1 | tee -a build.log
-
       - name: Setup Android SDK
         run: |
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
@@ -59,19 +52,6 @@ jobs:
           DEX_KEY: ${{ secrets.DEX_ENCRYPTION_KEY }}
         run: python scripts/encrypt_dex.py 2>&1 | tee -a build.log
 
-      - name: Decompile APK
-        run: apktool d companion.apk -o apk_decompiled --no-src -f 2>&1 | tee -a build.log
-
-      - name: Fix res/type1 folder name
-        run: |
-          if [ -d apk_decompiled/res/type1 ]; then
-            mv apk_decompiled/res/type1 apk_decompiled/res/animator
-            echo "[*] Renamed res/type1 to res/animator" | tee -a build.log
-            # Update apktool.yml to reflect correct type name
-            sed -i 's/type1/animator/g' apk_decompiled/apktool.yml
-            echo "[*] Updated apktool.yml" | tee -a build.log
-          fi
-
       - name: Compile DexLoader and CompanionApp
         run: |
           mkdir -p compiled_classes
@@ -81,15 +61,37 @@ jobs:
             -d compiled_classes 2>&1 | tee -a build.log
           $D8 --output compiled_classes/ $(find compiled_classes -name "*.class") 2>&1 | tee -a build.log
           mv compiled_classes/classes.dex dexloader.dex
+          echo "[*] DexLoader compiled." | tee -a build.log
 
-      - name: Inject DexLoader DEX into decompiled APK
-        run: cp dexloader.dex apk_decompiled/classes2.dex 2>&1 | tee -a build.log
+      - name: Inject DEX directly into APK zip
+        run: |
+          cp companion.apk companion-modified.apk
+          # Add classes2.dex (DexLoader) directly into APK
+          zip companion-modified.apk dexloader.dex
+          cd companion-modified-extract && true || true
+          # Rename inside zip to classes2.dex
+          python3 - << 'PYEOF'
+          import zipfile, shutil, os
 
-      - name: Patch AndroidManifest
-        run: python3 scripts/patch_manifest.py apk_decompiled/AndroidManifest.xml 2>&1 | tee -a build.log
+          src = "companion.apk"
+          dst = "companion-modified.apk"
+          dex = "dexloader.dex"
 
-      - name: Repackage APK
-        run: apktool b apk_decompiled -o companion-unsigned.apk --use-aapt2 2>&1 | tee -a build.log
+          shutil.copy(src, dst)
+
+          with zipfile.ZipFile(dst, 'a') as z:
+              z.write(dex, "classes2.dex")
+
+          print("[*] classes2.dex injected into APK.")
+          PYEOF
+          echo "[*] DEX injection done." | tee -a build.log
+
+      - name: Patch AndroidManifest in APK
+        run: |
+          python3 scripts/patch_apk_manifest.py companion-modified.apk 2>&1 | tee -a build.log
+
+      - name: Zipalign APK
+        run: zipalign -v 4 companion-modified.apk companion-aligned.apk 2>&1 | tee -a build.log
 
       - name: Generate signing keystore
         run: |
@@ -102,9 +104,6 @@ jobs:
             -keypass android \
             -dname "CN=Companion, OU=App, O=Dev, L=City, S=State, C=US" 2>&1 | tee -a build.log
 
-      - name: Zipalign APK
-        run: zipalign -v 4 companion-unsigned.apk companion-aligned.apk 2>&1 | tee -a build.log
-
       - name: Sign APK
         run: |
           apksigner sign \
@@ -114,6 +113,7 @@ jobs:
             --key-pass pass:android \
             --out companion-protected.apk \
             companion-aligned.apk 2>&1 | tee -a build.log
+          echo "[*] APK signed." | tee -a build.log
 
       - name: Get version tag
         id: version
