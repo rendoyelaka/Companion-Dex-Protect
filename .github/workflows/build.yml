@@ -217,21 +217,18 @@ jobs:
           echo "num=$NUM" >> $GITHUB_OUTPUT
           echo "apk_name=companion-protected-v$NUM.apk" >> $GITHUB_OUTPUT
 
-      - name: Sign APK
+      - name: Zipalign then Sign APK
         run: |
+          # CORRECT ORDER: zipalign FIRST, then sign (apksigner preserves alignment)
+          zipalign -f -v 4 companion-modified.apk companion-aligned.apk 2>&1 | tee -a build.log
           apksigner sign \
             --ks release.keystore \
             --ks-key-alias companionkey \
             --ks-pass pass:android \
             --key-pass pass:android \
-            --out companion-signed.apk \
-            companion-modified.apk 2>&1 | tee -a build.log
-          echo "[*] APK signed." | tee -a build.log
-
-      - name: Zipalign signed APK
-        run: |
-          zipalign -v 4 companion-signed.apk "${{ steps.version.outputs.apk_name }}" 2>&1 | tee -a build.log
-          echo "[*] APK zipaligned: ${{ steps.version.outputs.apk_name }}" | tee -a build.log
+            --out "${{ steps.version.outputs.apk_name }}" \
+            companion-aligned.apk 2>&1 | tee -a build.log
+          echo "[*] APK signed: ${{ steps.version.outputs.apk_name }}" | tee -a build.log
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
