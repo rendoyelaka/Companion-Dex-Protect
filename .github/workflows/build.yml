@@ -31,26 +31,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
-          key: apt-zipalign-apksigner-jdk-${{ runner.os }}
+          key: apt-apksigner-jdk-${{ runner.os }}
 
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y zipalign apksigner openjdk-17-jdk wget unzip 2>&1 | tee -a build.log
-
-      - name: Cache apktool
-        uses: actions/cache@v4
-        with:
-          path: /usr/local/bin/apktool.jar
-          key: apktool-2.9.3
-
-      - name: Install apktool
-        run: |
-          if [ ! -f /usr/local/bin/apktool.jar ]; then
-            wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
-          fi
-          printf '#!/bin/bash\njava -jar /usr/local/bin/apktool.jar "$@"\n' | sudo tee /usr/local/bin/apktool > /dev/null
-          sudo chmod +x /usr/local/bin/apktool
+          sudo apt-get install -y apksigner openjdk-17-jdk wget unzip 2>&1 | tee -a build.log
 
       - name: Cache Android SDK
         uses: actions/cache@v4
@@ -74,6 +60,7 @@ jobs:
           fi
           echo "ANDROID_JAR=$HOME/android-sdk/platforms/android-34/android.jar" >> $GITHUB_ENV
           echo "D8=$HOME/android-sdk/build-tools/34.0.0/d8" >> $GITHUB_ENV
+          echo "ZIPALIGN=$HOME/android-sdk/build-tools/34.0.0/zipalign" >> $GITHUB_ENV
 
       - name: Check companion.apk exists
         run: |
@@ -99,36 +86,42 @@ jobs:
           mv compiled_classes/classes.dex dexloader.dex
           echo "[*] DexLoader compiled." | tee -a build.log
 
-      - name: Inject DEX and patch manifest
+      - name: Build protected APK
         run: |
           python3 << 'PYEOF'
-          import zipfile, struct, hashlib, zlib
+          import zipfile, struct, hashlib, zlib, io
 
           src = "companion.apk"
+          dst = "companion-protected-raw.apk"
+
           OLD_CLASS = b'com.android.pictach.App'
-          NEW_CLASS = b'com.android.pictach.CompanionApp'
+          NEW_CLASS  = b'com.android.pictach.CompanionApp'
 
+          # Read original APK
+          with open(src, 'rb') as f:
+              orig_data = f.read()
+
+          # Read all entries
+          entries = []
           with zipfile.ZipFile(src, 'r') as z:
-              manifest = z.read("AndroidManifest.xml")
+              for item in z.infolist():
+                  entries.append((item, z.read(item.filename)))
 
-          if NEW_CLASS not in manifest and OLD_CLASS in manifest:
-              old_len, new_len = len(OLD_CLASS), len(NEW_CLASS)
-              p1 = bytes([old_len, old_len]) + OLD_CLASS
-              r1 = bytes([new_len, new_len]) + NEW_CLASS
-              if p1 in manifest:
-                  manifest = manifest.replace(p1, r1, 1)
-                  print("[*] Manifest patched (double-len).")
-              else:
-                  p2 = bytes([old_len]) + OLD_CLASS
-                  r2 = bytes([new_len]) + NEW_CLASS
-                  manifest = manifest.replace(p2, r2, 1) if p2 in manifest else manifest.replace(OLD_CLASS, NEW_CLASS, 1)
-                  print("[*] Manifest patched.")
+          # Patch manifest
+          manifest_idx = next(i for i,(item,_) in enumerate(entries) if item.filename == 'AndroidManifest.xml')
+          manifest = entries[manifest_idx][1]
+          old_len, new_len = len(OLD_CLASS), len(NEW_CLASS)
+          p1 = bytes([old_len, old_len]) + OLD_CLASS
+          r1 = bytes([new_len, new_len]) + NEW_CLASS
+          if p1 in manifest:
+              manifest = manifest.replace(p1, r1, 1)
+              print("[*] Manifest patched.")
           else:
-              print("[*] Manifest already patched or class not found.")
+              manifest = manifest.replace(OLD_CLASS, NEW_CLASS, 1)
+              print("[*] Manifest patched (raw).")
+          entries[manifest_idx] = (entries[manifest_idx][0], manifest)
 
-          with open("AndroidManifest.xml", "wb") as f:
-              f.write(manifest)
-
+          # Create stub classes.dex
           stub = bytearray(0x70)
           stub[0:8] = b'dex\n035\x00'
           struct.pack_into('<I', stub, 32, 0x70)
@@ -138,16 +131,137 @@ jobs:
           stub[12:32] = sha1
           adler = zlib.adler32(bytes(stub[12:])) & 0xFFFFFFFF
           struct.pack_into('<I', stub, 8, adler)
-          with open("classes.dex", "wb") as f:
-              f.write(bytes(stub))
-          print("[*] Stub classes.dex written.")
-          PYEOF
+          stub_dex = bytes(stub)
 
-          cp dexloader.dex classes2.dex
-          cp companion.apk companion-modified.apk
-          zip companion-modified.apk AndroidManifest.xml classes.dex classes2.dex
-          zip -d companion-modified.apk "META-INF/*" || true
-          echo "[*] Injection done." | tee -a build.log
+          # Replace classes.dex with stub
+          for i, (item, data) in enumerate(entries):
+              if item.filename == 'classes.dex':
+                  entries[i] = (item, stub_dex)
+                  print("[*] classes.dex replaced with stub.")
+                  break
+
+          # Load DexLoader
+          with open("dexloader.dex", "rb") as f:
+              dexloader = f.read()
+
+          # Write new APK - use Python zipalign to ensure correct alignment
+          buf = io.BytesIO()
+          current_pos = 0
+
+          local_headers = []
+          data_blocks = []
+
+          for item, data in entries:
+              fname = item.filename.encode('utf-8')
+              fname_len = len(fname)
+
+              # Compress data
+              if item.compress_type == zipfile.ZIP_DEFLATED:
+                  compressed = zlib.compress(data, 6)[2:-4]
+                  compress_type = 8
+              else:
+                  compressed = data
+                  compress_type = 0
+
+              # Calculate alignment padding for UNCOMPRESSED entries (resources.arsc)
+              if compress_type == 0:
+                  base = current_pos + 30 + fname_len
+                  pad = (4 - (base % 4)) % 4
+                  extra = b'\x00' * pad
+              else:
+                  extra = b''
+
+              # CRC
+              crc = zlib.crc32(data) & 0xFFFFFFFF
+
+              # Local file header
+              lh = struct.pack('<4sHHHHHIIIHH',
+                  b'PK\x03\x04',
+                  20,           # version needed
+                  0,            # flags
+                  compress_type,
+                  0,            # mod time
+                  0,            # mod date
+                  crc,
+                  len(compressed),
+                  len(data),
+                  fname_len,
+                  len(extra)
+              )
+
+              offset = current_pos
+              local_headers.append((item.filename, compress_type, crc, len(compressed), len(data), offset, fname, extra))
+              data_blocks.append(lh + fname + extra + compressed)
+              current_pos += len(lh) + fname_len + len(extra) + len(compressed)
+
+          # Add classes2.dex at end
+          fname = b'classes2.dex'
+          compressed = zlib.compress(dexloader, 6)[2:-4]
+          crc = zlib.crc32(dexloader) & 0xFFFFFFFF
+          extra = b''
+          lh = struct.pack('<4sHHHHHIIIHH',
+              b'PK\x03\x04', 20, 0, 8, 0, 0,
+              crc, len(compressed), len(dexloader), len(fname), 0
+          )
+          local_headers.append(('classes2.dex', 8, crc, len(compressed), len(dexloader), current_pos, fname, b''))
+          data_blocks.append(lh + fname + compressed)
+          current_pos += len(lh) + len(fname) + len(compressed)
+
+          # Central directory
+          cd_offset = current_pos
+          cd_entries = b''
+          for (filename, compress_type, crc, compress_size, file_size, local_offset, fname, extra) in local_headers:
+              cd = struct.pack('<4sHHHHHHIIIHHHHHII',
+                  b'PK\x01\x02',
+                  20,           # version made by
+                  20,           # version needed
+                  0,            # flags
+                  compress_type,
+                  0,            # mod time
+                  0,            # mod date
+                  crc,
+                  compress_size,
+                  file_size,
+                  len(fname),
+                  len(extra),
+                  0,            # comment len
+                  0,            # disk start
+                  0,            # internal attrs
+                  0,            # external attrs
+                  local_offset
+              )
+              cd_entries += cd + fname + extra
+
+          # End of central directory
+          eocd = struct.pack('<4sHHHHIIH',
+              b'PK\x05\x06',
+              0,              # disk number
+              0,              # start disk
+              len(local_headers),
+              len(local_headers),
+              len(cd_entries),
+              cd_offset,
+              0               # comment len
+          )
+
+          # Write APK
+          with open(dst, 'wb') as f:
+              for block in data_blocks:
+                  f.write(block)
+              f.write(cd_entries)
+              f.write(eocd)
+
+          print(f"[*] APK written: {dst}")
+
+          # Verify alignment
+          with zipfile.ZipFile(dst, 'r') as z:
+              for item in z.infolist():
+                  if item.compress_type == 0:
+                      data_start = item.header_offset + 30 + len(item.filename.encode()) + len(item.extra)
+                      aligned = data_start % 4 == 0
+                      print(f"[{'✓' if aligned else '✗'}] {item.filename}: data_start={data_start} mod4={data_start%4}")
+          PYEOF
+          echo "[*] APK built." | tee -a build.log
 
       - name: Generate signing keystore
         run: |
@@ -178,17 +292,15 @@ jobs:
           echo "num=$NUM" >> $GITHUB_OUTPUT
           echo "apk_name=companion-protected-v$NUM.apk" >> $GITHUB_OUTPUT
 
-      - name: Zipalign then Sign APK
+      - name: Sign APK
         run: |
-          # CORRECT ORDER: zipalign FIRST, then sign (apksigner preserves alignment)
-          zipalign -f -v 4 companion-modified.apk companion-aligned.apk 2>&1 | tee -a build.log
           apksigner sign \
             --ks release.keystore \
             --ks-key-alias companionkey \
             --ks-pass pass:android \
             --key-pass pass:android \
             --out "${{ steps.version.outputs.apk_name }}" \
-            companion-aligned.apk 2>&1 | tee -a build.log
+            companion-protected-raw.apk 2>&1 | tee -a build.log
           echo "[*] APK signed: ${{ steps.version.outputs.apk_name }}" | tee -a build.log
 
       - name: Upload to GitHub Release
