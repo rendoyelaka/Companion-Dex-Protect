@@ -188,9 +188,6 @@ jobs:
           PYEOF
           echo "[*] Injection done." | tee -a build.log
 
-      - name: Zipalign APK
-        run: zipalign -v 4 companion-modified.apk companion-aligned.apk 2>&1 | tee -a build.log
-
       - name: Generate signing keystore
         run: |
           keytool -genkeypair -v \
@@ -227,9 +224,14 @@ jobs:
             --ks-key-alias companionkey \
             --ks-pass pass:android \
             --key-pass pass:android \
-            --out "${{ steps.version.outputs.apk_name }}" \
-            companion-aligned.apk 2>&1 | tee -a build.log
-          echo "[*] APK signed: ${{ steps.version.outputs.apk_name }}" | tee -a build.log
+            --out companion-signed.apk \
+            companion-modified.apk 2>&1 | tee -a build.log
+          echo "[*] APK signed." | tee -a build.log
+
+      - name: Zipalign signed APK
+        run: |
+          zipalign -v 4 companion-signed.apk "${{ steps.version.outputs.apk_name }}" 2>&1 | tee -a build.log
+          echo "[*] APK zipaligned: ${{ steps.version.outputs.apk_name }}" | tee -a build.log
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
