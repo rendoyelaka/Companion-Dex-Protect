@@ -11,10 +11,10 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -102,7 +102,7 @@ jobs:
         run: echo "tag=release-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Protected APK ${{ steps.version.outputs.tag }}
@@ -125,7 +125,7 @@ jobs:
 
       - name: Upload build log as artifact
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: build.log
