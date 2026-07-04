@@ -1,0 +1,15 @@
+{
+  "name": "companion-key-server",
+  "version": "1.0.0",
+  "main": "railway-server/index.js",
+  "scripts": {
+    "start": "node railway-server/index.js",
+    "install": "cd railway-server && npm install"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
