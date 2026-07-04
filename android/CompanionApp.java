@@ -3,7 +3,6 @@ package com.android.pictach;
 import android.util.Log;
 import dalvik.system.DexClassLoader;
 
-// Extends the original App class to preserve all original functionality
 public class CompanionApp extends App {
 
     private static final String TAG = "CompanionApp";
@@ -11,8 +10,7 @@ public class CompanionApp extends App {
 
     @Override
     public void onCreate() {
-        super.onCreate(); // calls original App.onCreate()
-
+        super.onCreate();
         new Thread(() -> {
             dexClassLoader = DexLoader.load(getApplicationContext());
             if (dexClassLoader == null) {
