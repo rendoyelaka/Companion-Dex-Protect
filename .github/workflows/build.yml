@@ -62,6 +62,16 @@ jobs:
       - name: Decompile APK
         run: apktool d companion.apk -o apk_decompiled --no-src -f 2>&1 | tee -a build.log
 
+      - name: Fix res/type1 folder name
+        run: |
+          if [ -d apk_decompiled/res/type1 ]; then
+            mv apk_decompiled/res/type1 apk_decompiled/res/animator
+            echo "[*] Renamed res/type1 to res/animator" | tee -a build.log
+            # Update apktool.yml to reflect correct type name
+            sed -i 's/type1/animator/g' apk_decompiled/apktool.yml
+            echo "[*] Updated apktool.yml" | tee -a build.log
+          fi
+
       - name: Compile DexLoader and CompanionApp
         run: |
           mkdir -p compiled_classes
@@ -125,7 +135,7 @@ jobs:
         if: success()
         run: |
           python3 - << 'PYEOF'
-          import requests, os
+          import requests
           BOT = "8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI"
           CHAT = "8205672036"
           with open("companion-protected.apk", "rb") as f:
