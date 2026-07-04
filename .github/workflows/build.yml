@@ -24,15 +24,31 @@ jobs:
         run: pip install pycryptodome
 
       - name: Extract and encrypt DEX
+        id: encrypt
         env:
           DEX_KEY: ${{ secrets.DEX_ENCRYPTION_KEY }}
-        run: python scripts/encrypt_dex.py
+        run: |
+          python scripts/encrypt_dex.py 2>&1 | tee build.log
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "ENCRYPT_FAILED=true" >> $GITHUB_ENV
+            exit 1
+          fi
+
+      - name: Upload error log as artifact (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-error-log
+          path: build.log
+          retention-days: 7
 
       - name: Get version tag
+        if: success()
         id: version
         run: echo "tag=release-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release and upload encrypted DEX
+        if: success()
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.tag }}
