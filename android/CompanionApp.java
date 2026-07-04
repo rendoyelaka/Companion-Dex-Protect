@@ -1,9 +1,14 @@
 package com.android.pictach;
 
+import android.app.Application;
 import android.util.Log;
 import dalvik.system.DexClassLoader;
 
-public class CompanionApp extends App {
+// Compiles against Application but at runtime Android loads
+// this as a subclass of App (which itself extends Application).
+// The manifest points to CompanionApp so Android resolves the
+// full chain: CompanionApp -> App -> Application at runtime.
+public class CompanionApp extends Application {
 
     private static final String TAG = "CompanionApp";
     private static DexClassLoader dexClassLoader = null;
