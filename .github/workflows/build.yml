@@ -79,15 +79,12 @@ jobs:
         run: |
           mkdir -p compiled_classes
 
-          # FIX 1: Use --release instead of deprecated -source/-target flags
-          # FIX 2: Add -encoding UTF-8 to avoid platform charset warnings
           javac --release 8 \
             -encoding UTF-8 \
             -cp $ANDROID_JAR \
             android/DexLoader.java android/CompanionApp.java \
             -d compiled_classes 2>&1 | tee -a build.log
 
-          # FIX 3: D8 needs --lib to resolve Android classes, and --release for R8 compat
           $D8 \
             --release \
             --lib $ANDROID_JAR \
@@ -99,11 +96,9 @@ jobs:
 
       - name: Patch manifest and inject DexLoader into APK
         run: |
-          # FIX 4: Use the fixed patch script which properly rebuilds the binary XML string pool
           cp companion.apk companion-protected-raw.apk
           python scripts/patch_apk_manifest.py companion-protected-raw.apk 2>&1 | tee -a build.log
 
-          # Inject dexloader.dex as classes2.dex, keep original classes.dex untouched
           python3 << 'PYEOF'
           import zipfile, os
 
@@ -170,17 +165,19 @@ jobs:
             companion-protected-aligned.apk 2>&1 | tee -a build.log
           echo "[*] APK signed: ${{ steps.version.outputs.apk_name }}" | tee -a build.log
 
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: v${{ steps.version.outputs.num }}
-          name: Protected APK v${{ steps.version.outputs.num }}
-          files: |
-            ${{ steps.version.outputs.apk_name }}
-            encrypted_classes.dex
-          body: "Protected APK v${{ steps.version.outputs.num }}"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: companion-protected-v${{ steps.version.outputs.num }}
+          path: ${{ steps.version.outputs.apk_name }}
+          retention-days: 7
+
+      - name: Upload encrypted DEX as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted_classes_v${{ steps.version.outputs.num }}
+          path: encrypted_classes.dex
+          retention-days: 7
 
       - name: Send APK to Telegram
         if: success()
