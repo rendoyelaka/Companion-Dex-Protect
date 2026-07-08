@@ -7,10 +7,8 @@ Android binary XML string pool uses UTF-8 encoding with a 2-byte length prefix:
   bytes:  UTF-8 string data
   null:   \\x00 terminator
 
-Old script was guessing the length encoding. This version parses the actual
-string pool, finds the exact entry for 'com.android.pictach.App', replaces it
-with 'com.android.pictach.CompanionApp', updates all length bytes correctly,
-recalculates all string offsets, and rebuilds the string pool in place.
+This version also patches android.intent.category.INFO -> LAUNCHER so the
+APK shows a proper install prompt and launcher icon.
 """
 
 import sys
@@ -23,6 +21,11 @@ import io
 # ── Config ───────────────────────────────────────────────────────────────────
 OLD_CLASS = "com.android.pictach.App"
 NEW_CLASS = "com.android.pictach.CompanionApp"
+
+# Extra string pool replacements applied after the main class rename
+EXTRA_REPLACEMENTS = {
+    "android.intent.category.INFO": "android.intent.category.LAUNCHER",
+}
 
 def encode_utf8_len(n):
     """Encode a string-pool length value the Android way."""
@@ -42,16 +45,16 @@ def patch_manifest(manifest_data):
     """
     Parse the binary AndroidManifest.xml string pool, find OLD_CLASS,
     replace with NEW_CLASS, rebuild pool with correct offsets.
+    Also applies EXTRA_REPLACEMENTS.
     Returns patched manifest bytes.
     """
     # ── 1. Parse file header ──────────────────────────────────────────────────
-    # File: RES_XML_TYPE(2) + headerSize(2) + fileSize(4)
     file_type    = struct.unpack_from('<H', manifest_data, 0)[0]
     file_hdr_sz  = struct.unpack_from('<H', manifest_data, 2)[0]
     assert file_type == 0x0003, f"Not a binary XML file: {hex(file_type)}"
 
     # ── 2. Parse string pool chunk ────────────────────────────────────────────
-    sp_start      = file_hdr_sz  # string pool starts right after file header
+    sp_start      = file_hdr_sz
     sp_type       = struct.unpack_from('<H', manifest_data, sp_start)[0]
     sp_hdr_sz     = struct.unpack_from('<H', manifest_data, sp_start + 2)[0]
     sp_chunk_sz   = struct.unpack_from('<I', manifest_data, sp_start + 4)[0]
@@ -65,11 +68,7 @@ def patch_manifest(manifest_data):
     is_utf8 = bool(flags & (1 << 8))
     assert is_utf8, "String pool is UTF-16 — unexpected. Report this."
 
-    # Offset of the string offsets array (right after the 28-byte header)
-    offsets_array_start = sp_start + sp_hdr_sz  # actually sp_start + 28
-    # But sp_hdr_sz is 28 for string pool, offsets start at sp_start+28
     offsets_array_start = sp_start + 28
-
     strings_data_start = sp_start + strings_start
 
     # Read all string entries as raw bytes
@@ -78,7 +77,6 @@ def patch_manifest(manifest_data):
         off = struct.unpack_from('<I', manifest_data, offsets_array_start + i * 4)[0]
         abs_off = strings_data_start + off
 
-        # Parse char length
         b0 = manifest_data[abs_off]
         if b0 & 0x80:
             char_len = ((b0 & 0x7F) << 8) | manifest_data[abs_off + 1]
@@ -87,7 +85,6 @@ def patch_manifest(manifest_data):
             char_len = b0
             byte_len_off = abs_off + 1
 
-        # Parse byte length
         b1 = manifest_data[byte_len_off]
         if b1 & 0x80:
             byte_len = ((b1 & 0x7F) << 8) | manifest_data[byte_len_off + 1]
@@ -102,16 +99,23 @@ def patch_manifest(manifest_data):
     # ── 3. Find and replace ───────────────────────────────────────────────────
     if NEW_CLASS in raw_entries:
         print(f"[*] Manifest already patched — {NEW_CLASS} found.")
-        return manifest_data
-
-    if OLD_CLASS not in raw_entries:
+    elif OLD_CLASS not in raw_entries:
         print(f"[!] '{OLD_CLASS}' not found in string pool.")
         print("    Strings found:", [s for s in raw_entries if 'pictach' in s])
         sys.exit(1)
+    else:
+        idx = raw_entries.index(OLD_CLASS)
+        raw_entries[idx] = NEW_CLASS
+        print(f"[*] Replaced index {idx}: '{OLD_CLASS}' -> '{NEW_CLASS}'")
 
-    idx = raw_entries.index(OLD_CLASS)
-    raw_entries[idx] = NEW_CLASS
-    print(f"[*] Replaced index {idx}: '{OLD_CLASS}' -> '{NEW_CLASS}'")
+    # Apply extra replacements
+    for old_str, new_str in EXTRA_REPLACEMENTS.items():
+        if old_str in raw_entries:
+            idx2 = raw_entries.index(old_str)
+            raw_entries[idx2] = new_str
+            print(f"[*] Replaced index {idx2}: '{old_str}' -> '{new_str}'")
+        else:
+            print(f"[*] '{old_str}' not found — skipping.")
 
     # ── 4. Rebuild string pool data ───────────────────────────────────────────
     new_string_data = bytearray()
@@ -121,30 +125,27 @@ def patch_manifest(manifest_data):
         new_offsets.append(len(new_string_data))
         new_string_data += encode_string_entry(s)
 
-    # Style data stays unchanged (copy as-is)
     style_data_start = sp_start + styles_start if styles_start > 0 else sp_start + sp_chunk_sz
     style_data_end   = sp_start + sp_chunk_sz
     style_bytes      = manifest_data[style_data_start:style_data_end] if styles_start > 0 else b''
 
     # ── 5. Build new string pool chunk ───────────────────────────────────────
-    # New offsets array
     new_offsets_bytes = b''.join(struct.pack('<I', o) for o in new_offsets)
 
-    # new strings_start = header(28) + offsets array
     new_strings_start = 28 + len(new_offsets_bytes)
     new_styles_start  = (new_strings_start + len(new_string_data)) if style_bytes else 0
 
     new_sp_chunk_sz = (28 + len(new_offsets_bytes) + len(new_string_data) + len(style_bytes))
 
     new_sp_header = struct.pack('<HHIIIIII',
-        0x0001,               # chunk type: string pool
-        28,                   # header size
-        new_sp_chunk_sz,      # chunk size
-        string_count,         # string count
-        style_count,          # style count
-        flags,                # flags (keep UTF-8 flag)
-        new_strings_start,    # stringsStart
-        new_styles_start,     # stylesStart
+        0x0001,
+        28,
+        new_sp_chunk_sz,
+        string_count,
+        style_count,
+        flags,
+        new_strings_start,
+        new_styles_start,
     )
 
     new_sp_chunk = (
@@ -155,11 +156,9 @@ def patch_manifest(manifest_data):
     )
 
     # ── 6. Assemble patched manifest ──────────────────────────────────────────
-    # Everything before string pool + new string pool + everything after old pool
     before_sp   = manifest_data[:sp_start]
     after_sp    = manifest_data[sp_start + sp_chunk_sz:]
 
-    # Update file size in header
     new_file_size = len(before_sp) + len(new_sp_chunk) + len(after_sp)
     patched = bytearray(before_sp + new_sp_chunk + after_sp)
     struct.pack_into('<I', patched, 4, new_file_size)
@@ -181,7 +180,6 @@ def rebuild_apk(apk_path, patched_manifest):
                     data = src_zip.read(item.filename)
                     dst_zip.writestr(item, data)
 
-    # Replace original
     shutil.move(tmp_path, apk_path)
     print(f"[*] APK rebuilt: {apk_path}")
 
@@ -195,6 +193,10 @@ def verify_patch(apk_path):
     else:
         print(f"[✗] Verification FAILED — '{NEW_CLASS}' not found after patch!")
         sys.exit(1)
+    if b'category.LAUNCHER' in data:
+        print(f"[✓] LAUNCHER category confirmed in manifest.")
+    else:
+        print(f"[!] WARNING: LAUNCHER category not found — install prompt may not appear.")
 
 
 if __name__ == '__main__':
